@@ -15,6 +15,8 @@ final class SettingsWindow: NSPanel {
         )
         title = "LLM Refinement Settings"
         isReleasedWhenClosed = false
+        level = .floating
+        hidesOnDeactivate = false
         setupUI()
         loadSettings()
         center()

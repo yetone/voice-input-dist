@@ -78,7 +78,7 @@ final class OverlayPanel: NSPanel {
 
         label.font = .systemFont(ofSize: 15, weight: .medium)
         label.textColor = NSColor.white.withAlphaComponent(0.92)
-        label.lineBreakMode = .byTruncatingTail
+        label.lineBreakMode = .byTruncatingHead
         label.maximumNumberOfLines = 1
         label.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         stack.addArrangedSubview(label)

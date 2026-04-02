@@ -8,10 +8,11 @@ final class SpeechEngine {
     var onAudioLevel: ((Float) -> Void)?
     var onLocaleUnavailable: ((String) -> Void)?
 
-    private let audioEngine = AVAudioEngine()
+    private var audioEngine = AVAudioEngine()
     private var recognitionRequest: SFSpeechAudioBufferRecognitionRequest?
     private var recognitionTask: SFSpeechRecognitionTask?
     private var speechRecognizer: SFSpeechRecognizer?
+    private var isRecording = false
 
     var locale: Locale {
         didSet {
@@ -25,6 +26,28 @@ final class SpeechEngine {
     init(locale: Locale = Locale(identifier: "zh-CN")) {
         self.locale = locale
         self.speechRecognizer = SFSpeechRecognizer(locale: locale)
+
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(handleAudioConfigChange),
+            name: .AVAudioEngineConfigurationChange,
+            object: nil
+        )
+    }
+
+    deinit {
+        NotificationCenter.default.removeObserver(self)
+    }
+
+    @objc private func handleAudioConfigChange(_ notification: Notification) {
+        guard isRecording else { return }
+        DispatchQueue.main.async { [weak self] in
+            guard let self, self.isRecording else { return }
+            self.cleanup()
+            self.audioEngine = AVAudioEngine()
+            self.isRecording = false
+            self.onError?("Audio device changed. Please try again.")
+        }
     }
 
     // MARK: - Permissions
@@ -65,6 +88,10 @@ final class SpeechEngine {
             return
         }
 
+        // Reset audio engine to pick up current input device
+        audioEngine.stop()
+        audioEngine = AVAudioEngine()
+
         let request = SFSpeechAudioBufferRecognitionRequest()
         request.shouldReportPartialResults = true
         if #available(macOS 13, *) {
@@ -89,6 +116,13 @@ final class SpeechEngine {
 
         let inputNode = audioEngine.inputNode
         let format = inputNode.outputFormat(forBus: 0)
+
+        guard format.sampleRate > 0 && format.channelCount > 0 else {
+            onError?("No valid audio input device found.")
+            cleanup()
+            return
+        }
+
         inputNode.installTap(onBus: 0, bufferSize: 1024, format: format) { [weak self] buffer, _ in
             request.append(buffer)
 
@@ -109,6 +143,7 @@ final class SpeechEngine {
         audioEngine.prepare()
         do {
             try audioEngine.start()
+            isRecording = true
         } catch {
             onError?("Audio engine failed: \(error.localizedDescription)")
             cleanup()
@@ -116,6 +151,7 @@ final class SpeechEngine {
     }
 
     func stopRecording() {
+        isRecording = false
         audioEngine.stop()
         audioEngine.inputNode.removeTap(onBus: 0)
         recognitionRequest?.endAudio()
@@ -127,6 +163,7 @@ final class SpeechEngine {
     }
 
     private func cleanup() {
+        isRecording = false
         if audioEngine.isRunning {
             audioEngine.stop()
             audioEngine.inputNode.removeTap(onBus: 0)
