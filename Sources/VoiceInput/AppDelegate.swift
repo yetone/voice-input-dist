@@ -5,6 +5,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var statusItem: NSStatusItem!
     private let keyMonitor = KeyMonitor()
     private let speechEngine = SpeechEngine()
+    private let audioRecorder = AudioRecorder()
     private let textInjector = TextInjector()
     private lazy var overlayPanel = OverlayPanel()
 
@@ -12,6 +13,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var isRecording = false
     private var lastPartialResult = ""
     private var finalResultTimer: Timer?
+    private var asrModeMenuItem: NSMenuItem!
 
     private var enableMenuItem: NSMenuItem!
     private var llmMenuItem: NSMenuItem!
@@ -49,6 +51,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     // MARK: - Key events
 
+    private var useLLMASR: Bool {
+        LLMASRClient.shared.isEnabled && LLMASRClient.shared.isConfigured
+    }
+
     private func fnDown() {
         guard isEnabled, !isRecording else { return }
         LLMRefiner.shared.cancel()
@@ -59,7 +65,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         overlayPanel.show(text: "Listening...")
         NSSound(named: .init("Tink"))?.play()
 
-        speechEngine.startRecording()
+        if useLLMASR {
+            audioRecorder.startRecording()
+        } else {
+            speechEngine.startRecording()
+        }
     }
 
     private func fnUp() {
@@ -67,10 +77,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         isRecording = false
 
         updateStatusIcon(recording: false)
-        speechEngine.stopRecording()
 
-        finalResultTimer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: false) { [weak self] _ in
-            self?.finishTranscription()
+        if useLLMASR {
+            audioRecorder.stopRecording()
+        } else {
+            speechEngine.stopRecording()
+            finalResultTimer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: false) { [weak self] _ in
+                self?.finishTranscription()
+            }
         }
     }
 
@@ -105,6 +119,37 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         speechEngine.onLocaleUnavailable = { [weak self] msg in
             self?.showAlert(title: "Language Unavailable", message: msg)
+        }
+
+        // LLM ASR 回调
+        audioRecorder.onAudioLevel = { [weak self] level in
+            self?.overlayPanel.updateAudioLevel(level)
+        }
+
+        audioRecorder.onFinished = { [weak self] audioData in
+            guard let self, let data = audioData else {
+                self?.overlayPanel.updateText("录音失败")
+                DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
+                    self?.overlayPanel.dismiss()
+                }
+                return
+            }
+
+            self.overlayPanel.updateText("识别中...")
+            LLMASRClient.shared.transcribe(audioData: data) { result in
+                DispatchQueue.main.async {
+                    switch result {
+                    case .success(let text):
+                        self.lastPartialResult = text
+                        self.finishTranscription()
+                    case .failure(let error):
+                        self.overlayPanel.updateText("ASR 失败: \(error.localizedDescription)")
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) {
+                            self.overlayPanel.dismiss()
+                        }
+                    }
+                }
+            }
         }
     }
 
@@ -224,6 +269,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         llmItem.submenu = llmMenu
         menu.addItem(llmItem)
 
+        // ASR Provider submenu
+        let asrItem = NSMenuItem(title: "ASR Provider", action: nil, keyEquivalent: "")
+        let asrMenu = NSMenu()
+
+        asrModeMenuItem = NSMenuItem(title: "Use LLM ASR", action: #selector(toggleASRMode), keyEquivalent: "")
+        asrModeMenuItem.target = self
+        asrModeMenuItem.state = LLMASRClient.shared.isEnabled ? .on : .off
+        asrMenu.addItem(asrModeMenuItem)
+
+        asrMenu.addItem(.separator())
+
+        let asrSettingsItem = NSMenuItem(title: "ASR Settings...", action: #selector(openASRSettings), keyEquivalent: "")
+        asrSettingsItem.target = self
+        asrMenu.addItem(asrSettingsItem)
+
+        asrItem.submenu = asrMenu
+        menu.addItem(asrItem)
+
         menu.addItem(.separator())
 
         let quitItem = NSMenuItem(title: "Quit VoiceInput", action: #selector(quit), keyEquivalent: "q")
@@ -254,6 +317,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             keyMonitor.stop()
             if isRecording {
                 speechEngine.cancel()
+                audioRecorder.cancel()
                 overlayPanel.dismiss()
                 isRecording = false
                 updateStatusIcon(recording: false)
@@ -279,6 +343,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc private func openLLMSettings() {
         settingsWindow.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+    }
+
+    @objc private func toggleASRMode() {
+        let client = LLMASRClient.shared
+        client.isEnabled.toggle()
+        asrModeMenuItem.state = client.isEnabled ? .on : .off
+    }
+
+    private lazy var asrSettingsWindow = ASRSettingsWindow()
+
+    @objc private func openASRSettings() {
+        asrSettingsWindow.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
     }
 
